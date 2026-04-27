@@ -3,7 +3,7 @@
  *
  * Plugin Name:          Wise payment for WooCommerce
  * Description:          WooCommerce payment gateway for Wise  
- * Version:              1.1
+ * Version:              1.2
  * Requires PHP:         7.0
  * Requires at least:    5.0
  * WC requires at least: 3.2
