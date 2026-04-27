@@ -37,6 +37,15 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
     /** @var string */
     public $add_description_to_url;
 
+    /** @var string  Discount percentage entered by admin (e.g. '5' means 5%) */
+    public $discount_percent;
+
+    /** @var string  Label shown on cart/checkout for the discount fee line */
+    public $discount_label;
+
+    /** @var string  'subtotal' or 'after_coupon' */
+    public $discount_base;
+
     public function __construct() {
         $this->id                 = 'wise_bacs';
         $this->has_fields         = false;
@@ -53,17 +62,41 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
         $this->instructions           = $this->get_option( 'instructions' );
         $this->wise_payment_url       = $this->get_option( 'wise_payment_url' );
         $this->add_description_to_url = $this->get_option( 'add_description_to_url' );
+        $this->discount_percent       = $this->get_option( 'discount_percent', '' );
+        $this->discount_label         = $this->get_option( 'discount_label', __( 'Discount for Wise payment', 'wise-payment-for-woocommerce' ) );
+        $this->discount_base          = $this->get_option( 'discount_base', 'after_coupon' );
 
         // Core actions.
         add_action( "woocommerce_update_options_payment_gateways_{$this->id}", array( $this, 'process_admin_options' ) );
         add_action( "woocommerce_thankyou_{$this->id}",                        array( $this, 'thankyou_page' ) );
+        add_action( 'admin_notices',                                           array( $this, 'maybe_show_url_notice' ) );
 
         // My Account "Pay" button.
         add_filter( 'woocommerce_my_account_my_orders_actions', array( $this, 'my_account_pay_action' ), 10, 2 );
 
         // Schedule on-hold promotion before WooCommerce auto-cancels the order (if Hold stock is set).
-        add_action( 'woocommerce_new_order', array( $this, 'schedule_onhold_promotion' ) );
-        add_action( 'wise_bacs_promote_to_onhold', array( $this, 'scheduled_promote_to_onhold' ) );
+        add_action( 'woocommerce_new_order',          array( $this, 'schedule_onhold_promotion' ) );
+        add_action( 'wise_bacs_promote_to_onhold',    array( $this, 'scheduled_promote_to_onhold' ) );
+
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin notices
+    // -------------------------------------------------------------------------
+
+    /**
+     * Show an admin notice if Wise is enabled but the payment URL is not set.
+     */
+    public function maybe_show_url_notice() {
+        if ( 'yes' !== $this->get_option( 'enabled' ) ) {
+            return;
+        }
+        if ( ! empty( $this->wise_payment_url ) ) {
+            return;
+        }
+        echo '<div class="notice notice-warning is-dismissible"><p>'
+            . esc_html__( 'Wise Payment for WooCommerce: please set the Wise Payment URL in the gateway settings to start accepting payments.', 'wise-payment-for-woocommerce' )
+            . '</p></div>';
     }
 
     // -------------------------------------------------------------------------
@@ -118,6 +151,37 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
                 'description' => __( 'When enabled, the order number will be appended to the Wise URL as a description parameter.', 'wise-payment-for-woocommerce' ),
                 'desc_tip'    => true,
             ),
+            'discount_percent'       => array(
+                'title'             => __( 'Discount (%)', 'wise-payment-for-woocommerce' ),
+                'type'              => 'number',
+                'description'       => __( 'Percentage discount applied when the customer selects Wise as payment method. Leave empty to disable. Example: 5 = 5% off.', 'wise-payment-for-woocommerce' ),
+                'default'           => '',
+                'desc_tip'          => true,
+                'placeholder'       => '0',
+                'custom_attributes' => array(
+                    'min'  => '0',
+                    'max'  => '100',
+                    'step' => '0.01',
+                ),
+            ),
+            'discount_label'         => array(
+                'title'       => __( 'Discount label', 'wise-payment-for-woocommerce' ),
+                'type'        => 'text',
+                'description' => __( 'Label shown next to the discount line on cart and checkout.', 'wise-payment-for-woocommerce' ),
+                'default'     => __( 'Discount for Wise payment', 'wise-payment-for-woocommerce' ),
+                'desc_tip'    => true,
+            ),
+            'discount_base'          => array(
+                'title'       => __( 'Discount base', 'wise-payment-for-woocommerce' ),
+                'type'        => 'select',
+                'description' => __( 'Choose whether the discount is calculated on the subtotal before or after coupon deductions.', 'wise-payment-for-woocommerce' ),
+                'options'     => array(
+                    'after_coupon' => __( 'Subtotal after coupons', 'wise-payment-for-woocommerce' ),
+                    'subtotal'     => __( 'Subtotal before coupons', 'wise-payment-for-woocommerce' ),
+                ),
+                'default'     => 'after_coupon',
+                'desc_tip'    => true,
+            ),
             'wipe_data'              => array(
                 'title'   => __( 'Wipe configuration', 'wise-payment-for-woocommerce' ),
                 'type'    => 'checkbox',
@@ -147,7 +211,6 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
             WC_Admin_Settings::add_error(
                 __( 'Wise Payment URL must be a valid wise.com URL (e.g. https://wise.com/pay/business/yourbusiness).', 'wise-payment-for-woocommerce' )
             );
-            // Keep existing value on error.
             return $this->get_option( $key );
         }
 
@@ -173,7 +236,6 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
 
         $parsed = wp_parse_url( $base_url );
 
-        // Guard: must have scheme and host.
         if ( empty( $parsed['scheme'] ) || empty( $parsed['host'] ) ) {
             return '';
         }
@@ -183,7 +245,6 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
             wp_parse_str( $parsed['query'], $existing );
         }
 
-        // Round amount to 2 decimal places to avoid float formatting issues.
         $new_params   = array( 'amount' => number_format( (float) $order->get_total(), 2, '.', '' ) );
         $utm_params   = array();
         $other_params = array();
@@ -211,90 +272,8 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
     }
 
     // -------------------------------------------------------------------------
-    // Admin
-    // -------------------------------------------------------------------------
-
-    /**
-     * Admin Panel Options — adds order preview dropdown below standard settings.
-     */
-    public function admin_options() {
-        // Show admin notice if Wise URL is not configured yet.
-        if ( 'yes' === $this->get_option( 'enabled' ) && empty( $this->wise_payment_url ) ) {
-            echo '<div class="notice notice-warning inline"><p>'
-                . esc_html__( 'Wise Payment for WooCommerce: please set the Wise Payment URL below to start accepting payments.', 'wise-payment-for-woocommerce' )
-                . '</p></div>';
-        }
-
-        parent::admin_options();
-
-        $options = $this->get_wise_orders();
-        ?>
-        <script type="text/javascript">
-        jQuery( function($) {
-            'use strict';
-            $('#woocommerce_wise_bacs_preview').on('change', function() {
-                try {
-                    var url = new URL( $(this).val() );
-                    window.open(url, '_blank');
-                } catch (_) {}
-                return false;
-            });
-        });
-        </script>
-        <table class="form-table">
-        <tbody>
-            <tr valign="top">
-                <th scope="row" class="titledesc">
-                    <label for="woocommerce_wise_bacs_preview">
-                        <?php echo esc_html__( 'Preview orders', 'wise-payment-for-woocommerce' ); ?>
-                    </label>
-                </th>
-                <td class="forminp">
-                    <fieldset>
-                        <select class="select" name="woocommerce_wise_bacs_preview" id="woocommerce_wise_bacs_preview">
-                            <option value=""><?php echo esc_html__( '-- choose order to preview --', 'wise-payment-for-woocommerce' ); ?></option>
-                            <?php foreach ( $options as $option ) echo $option; // phpcs:ignore WordPress.Security.EscapeOutput ?>
-                        </select>
-                        <p class="description"><?php echo esc_html__( 'Opens the Wise payment link for the selected order in a new tab.', 'wise-payment-for-woocommerce' ); ?></p>
-                    </fieldset>
-                </td>
-            </tr>
-        </tbody>
-        </table>
-        <?php
-    }
-
-    // -------------------------------------------------------------------------
     // Checkout / Payment flow
     // -------------------------------------------------------------------------
-
-    /**
-     * Process the payment and return the result.
-     *
-     * @param  int $order_id
-     * @return array
-     */
-    public function process_payment( $order_id ) {
-        $order = wc_get_order( $order_id );
-
-        if ( $order->get_total() > 0 ) {
-            // Start as pending — a cron event will promote to on-hold before auto-cancel (if Hold stock is set).
-            // so the customer first sees the payment button before status changes.
-            $order->update_status(
-                apply_filters( "woocommerce_{$this->id}_process_payment_order_status", 'pending', $order ),
-                __( 'Awaiting Wise payment.', 'wise-payment-for-woocommerce' )
-            );
-        } else {
-            $order->payment_complete();
-        }
-
-        WC()->cart->empty_cart();
-
-        return array(
-            'result'   => 'success',
-            'redirect' => $this->get_return_url( $order ),
-        );
-    }
 
     /**
      * Validate that the Wise URL is configured before the payment can be used.
@@ -310,6 +289,33 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Process the payment and return the result.
+     *
+     * @param  int $order_id
+     * @return array
+     */
+    public function process_payment( $order_id ) {
+        $order = wc_get_order( $order_id );
+
+        if ( $order->get_total() > 0 ) {
+            // Start as pending — a cron event will promote to on-hold before auto-cancel (if Hold stock is set).
+            $order->update_status(
+                apply_filters( "woocommerce_{$this->id}_process_payment_order_status", 'pending', $order ),
+                __( 'Awaiting Wise payment.', 'wise-payment-for-woocommerce' )
+            );
+        } else {
+            $order->payment_complete();
+        }
+
+        WC()->cart->empty_cart();
+
+        return array(
+            'result'   => 'success',
+            'redirect' => $this->get_return_url( $order ),
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -378,15 +384,14 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
     }
 
     // -------------------------------------------------------------------------
-    // Auto-cancel prevention + reminder email
+    // Auto-cancel prevention
     // -------------------------------------------------------------------------
 
     /**
-     * When a new order is placed via Wise, schedule a cron event to promote it
-     * to on-hold (N-1) minutes before WooCommerce would auto-cancel it.
+     * When a new Wise order is placed, schedule a cron event to promote it to
+     * on-hold (N-1) minutes before WooCommerce would auto-cancel it.
      *
-     * If "Hold stock (minutes)" is empty/0 in WooCommerce settings, no event is scheduled
-     * because there is no auto-cancellation risk.
+     * If "Hold stock (minutes)" is empty/0, no event is scheduled.
      *
      * @param int $order_id
      */
@@ -401,11 +406,9 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
 
         $hold_stock_minutes = (int) get_option( 'woocommerce_hold_stock_minutes', 0 );
         if ( $hold_stock_minutes <= 0 ) {
-            // Auto-cancellation disabled — nothing to do.
             return;
         }
 
-        // Fire 1 minute before WooCommerce would cancel.
         $delay = max( 1, $hold_stock_minutes - 1 ) * MINUTE_IN_SECONDS;
 
         wp_schedule_single_event(
@@ -417,7 +420,7 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
 
     /**
      * Cron callback: promote a Wise pending order to on-hold and send a payment reminder.
-     * Only runs if the order is still pending (i.e. customer hasn't paid yet).
+     * Only runs if the order is still pending (not yet paid).
      *
      * @param int $order_id
      */
@@ -429,7 +432,6 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
         if ( 'wise_bacs' !== $order->get_payment_method() ) {
             return;
         }
-        // If already paid/processing/completed — do nothing.
         if ( ! $order->has_status( 'pending' ) ) {
             return;
         }
@@ -441,6 +443,10 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
 
         $this->send_payment_reminder( $order );
     }
+
+    // -------------------------------------------------------------------------
+    // Reminder email
+    // -------------------------------------------------------------------------
 
     /**
      * Send a custom payment reminder email to the customer.
@@ -458,11 +464,10 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
         $site_name   = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
         $order_num   = $order->get_order_number();
         $order_total = wp_strip_all_tags( wc_price( $order->get_total(), array( 'currency' => $order->get_currency() ) ) );
+        $first_name  = $order->get_billing_first_name();
 
         /* translators: 1: site name, 2: order number */
         $subject = sprintf( __( '[%1$s] Payment reminder for order #%2$s', 'wise-payment-for-woocommerce' ), $site_name, $order_num );
-
-        $first_name = $order->get_billing_first_name();
 
         ob_start();
         wc_get_template( 'emails/email-header.php', array( 'email_heading' => __( 'Payment reminder', 'wise-payment-for-woocommerce' ) ) );
@@ -507,59 +512,15 @@ class EW_Gateway_Wise extends WC_Payment_Gateway {
 
         $headers = array( 'Content-Type: text/html; charset=UTF-8' );
 
-        // Use WooCommerce mailer for proper delivery.
         $mailer = WC()->mailer();
         $mailer->send( $to, $subject, $message, $headers );
 
-        // Log a note on the order.
         $order->add_order_note(
             /* translators: %s: customer email */
             sprintf( __( 'Wise payment reminder sent to %s.', 'wise-payment-for-woocommerce' ), $to )
         );
     }
 
-    // -------------------------------------------------------------------------
-    // Admin preview helpers
-    // -------------------------------------------------------------------------
-
-    /**
-     * Returns recent Wise orders as <option> elements for the admin preview dropdown.
-     *
-     * @return array
-     */
-    private function get_wise_orders() {
-        $options = array();
-
-        $orders = wc_get_orders( array(
-            'limit'          => $this->limit_orders,
-            'payment_method' => $this->id,
-            'return'         => 'objects',
-            'no_found_rows'  => true,
-        ) );
-
-        if ( empty( $orders ) ) {
-            return $options;
-        }
-
-        foreach ( $orders as $order ) {
-            $wise_url = $this->build_wise_url( $order );
-            $label    = sprintf(
-                /* translators: 1: order number 2: date 3: status */
-                __( 'Order #%1$s — %2$s (%3$s)', 'wise-payment-for-woocommerce' ),
-                $order->get_order_number(),
-                wc_format_datetime( $order->get_date_created() ),
-                wc_get_order_status_name( $order->get_status() )
-            );
-
-            if ( empty( $wise_url ) ) {
-                $options[] = '<option value="" disabled>' . esc_html( $label ) . ' — ' . esc_html__( 'URL not configured', 'wise-payment-for-woocommerce' ) . '</option>';
-            } else {
-                $options[] = '<option value="' . esc_attr( $wise_url ) . '">' . esc_html( $label ) . '</option>';
-            }
-        }
-
-        return $options;
-    }
-}
+} // end class EW_Gateway_Wise
 
 endif;

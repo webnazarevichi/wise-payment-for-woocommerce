@@ -45,3 +45,65 @@ add_action( 'before_woocommerce_init', function() {
         \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
     }
 });
+
+// ---------------------------------------------------------------------------
+// Discount fee — registered globally so it fires reliably on cart recalc,
+// mirroring the same pattern as a functions.php implementation.
+// Settings are read directly from the option row, not from the gateway object.
+// ---------------------------------------------------------------------------
+
+add_action( 'woocommerce_cart_calculate_fees', 'wise_bacs_apply_discount_fee', 20, 1 );
+
+function wise_bacs_apply_discount_fee( $cart ) {
+    if ( is_admin() && ! defined( 'DOING_AJAX' ) ) {
+        return;
+    }
+    if ( ! WC()->session ) {
+        return;
+    }
+
+    $chosen = WC()->session->get( 'chosen_payment_method' );
+    if ( 'wise_bacs' !== $chosen ) {
+        return;
+    }
+
+    $settings = get_option( 'woocommerce_wise_bacs_settings', array() );
+
+    $discount_percent = isset( $settings['discount_percent'] ) ? trim( $settings['discount_percent'] ) : '';
+    if ( '' === $discount_percent || (float) $discount_percent <= 0 ) {
+        return;
+    }
+
+    $discount_base  = isset( $settings['discount_base'] ) ? $settings['discount_base'] : 'after_coupon';
+    $discount_label = ( isset( $settings['discount_label'] ) && '' !== trim( $settings['discount_label'] ) )
+        ? $settings['discount_label']
+        : __( 'Discount for Wise payment', 'wise-payment-for-woocommerce' );
+
+    $percentage = (float) $discount_percent / 100;
+
+    if ( 'subtotal' === $discount_base ) {
+        $base = $cart->get_subtotal();
+    } else {
+        // after_coupon: subtract coupon discounts
+        $base = $cart->get_subtotal() - $cart->get_cart_discount_total();
+    }
+
+    $discount = round( $base * $percentage, wc_get_price_decimals() ) * -1;
+
+    $cart->add_fee( $discount_label, $discount, false );
+}
+
+// JS: refresh checkout totals when payment method changes.
+add_action( 'woocommerce_review_order_before_payment', 'wise_bacs_payment_method_refresh_script' );
+
+function wise_bacs_payment_method_refresh_script() {
+    ?>
+    <script>
+    (function($){
+        $(document.body).on('change', 'input[name="payment_method"]', function() {
+            $('body').trigger('update_checkout');
+        });
+    })(jQuery);
+    </script>
+    <?php
+}
